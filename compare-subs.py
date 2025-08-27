@@ -1,227 +1,327 @@
 import pysrt
-import csv
+import json
 import sys
-import os
 from pathlib import Path
 import chardet
 
-def detect_encoding(file_path):
-    """More robust encoding detection with fallbacks"""
+def debug_print(message):
+    """Simple debug printing"""
+    print(f"   🔍 {message}")
+
+def detect_encoding_correctly(file_path):
+    """Better encoding detection with Persian language focus"""
     try:
-        with open(file_path, "rb") as f:
-            raw_data = f.read(10000)  # read more data for better detection
-            
-        # Try chardet first
-        result = chardet.detect(raw_data)
-        if result['confidence'] > 0.7:
-            detected_encoding = result['encoding'].lower()
-            # Map common encodings to proper names
-            encoding_map = {
-                'windows-1252': 'cp1252',
-                'iso-8859-1': 'latin-1',
-                'iso-8859-9': 'latin-5',
-            }
-            return encoding_map.get(detected_encoding, detected_encoding)
+        with open(file_path, 'rb') as f:
+            raw_data = f.read(50000)  # Read more data for better detection
         
-        # Fallback: check for UTF-8 BOM
+        # First, check for UTF-8 BOM
         if raw_data.startswith(b'\xef\xbb\xbf'):
             return 'utf-8-sig'
+        
+        # Use chardet for initial detection
+        result = chardet.detect(raw_data)
+        
+        # For Persian/Unicode text, prefer UTF-8 variants
+        if result['encoding'] and result['confidence'] > 0.7:
+            detected = result['encoding'].lower()
             
-        # Fallback: try common encodings
-        for encoding in ['utf-8', 'cp1252', 'latin-1', 'iso-8859-1']:
+            # Common Persian encodings mapping
+            encoding_map = {
+                'windows-1256': 'cp1256',  # Arabic/Persian Windows encoding
+                'iso-8859-6': 'iso-8859-6',  # Arabic encoding
+                'utf-8': 'utf-8',
+                'ascii': 'utf-8',  # Force UTF-8 for ASCII detection
+            }
+            
+            return encoding_map.get(detected, 'utf-8')
+        
+        # If detection fails, try to identify Persian text patterns
+        # Persian text often contains specific Unicode ranges
+        try:
+            # Try UTF-8 first (most common for modern subtitles)
+            raw_data.decode('utf-8')
+            return 'utf-8'
+        except:
+            # Try Windows-1256 (common for Persian/Arabic)
             try:
-                raw_data.decode(encoding)
-                return encoding
-            except UnicodeDecodeError:
-                continue
+                raw_data.decode('cp1256')
+                return 'cp1256'
+            except:
+                # Final fallback
+                return 'utf-8'
                 
     except Exception as e:
-        print(f"   ⚠️  Encoding detection failed: {e}")
-    
-    return 'utf-8'  # ultimate fallback
+        debug_print(f"Encoding detection error: {e}")
+        return 'utf-8'
 
-def load_subs(filename):
-    """Load SRT file with robust encoding handling"""
-    max_attempts = 3
-    encodings_to_try = []
+def is_valid_persian_text(text):
+    """Check if text contains valid Persian characters or is empty"""
+    if not text.strip():
+        return True  # Empty text is valid
     
-    # First, try detected encoding
-    detected_encoding = detect_encoding(filename)
-    encodings_to_try.append(detected_encoding)
+    # Persian/Arabic Unicode ranges
+    persian_ranges = [
+        (0x0600, 0x06FF),   # Arabic block
+        (0x0750, 0x077F),   # Arabic Supplement
+        (0x08A0, 0x08FF),   # Arabic Extended-A
+        (0xFB50, 0xFDFF),   # Arabic Presentation Forms-A
+        (0xFE70, 0xFEFF),   # Arabic Presentation Forms-B
+    ]
     
-    # Add common fallbacks
-    encodings_to_try.extend(['utf-8-sig', 'utf-8', 'cp1252', 'latin-1', 'iso-8859-1'])
+    # Also allow basic Latin for numbers and punctuation
+    latin_ranges = [
+        (0x0020, 0x007F),   # Basic Latin
+    ]
     
-    for encoding in encodings_to_try[:max_attempts]:
-        try:
-            subs = pysrt.open(filename, encoding=encoding)
-            result = []
-            for sub in subs:
-                start = sub.start.hours * 3600 + sub.start.minutes * 60 + sub.start.seconds + sub.start.milliseconds / 1000
-                end = sub.end.hours * 3600 + sub.end.minutes * 60 + sub.end.seconds + sub.end.milliseconds / 1000
-                text = sub.text.replace("\n", " ").strip()
-                result.append((start, end, text))
-            print(f"   ✅ Successfully loaded with encoding: {encoding}")
-            return result
-        except UnicodeDecodeError:
-            continue
-        except Exception as e:
-            print(f"   ⚠️  Failed with encoding {encoding}: {e}")
-            continue
+    for char in text:
+        char_code = ord(char)
+        valid = False
+        
+        # Check if character is in any valid range
+        for range_start, range_end in persian_ranges + latin_ranges:
+            if range_start <= char_code <= range_end:
+                valid = True
+                break
+        
+        if not valid:
+            return False
     
-    # If all attempts fail, try with error handling
+    return True
+
+def load_subtitle_file_correctly(filename):
+    """Load subtitle file with proper Persian encoding handling"""
     try:
-        print(f"   ⚠️  Trying with error handling...")
-        subs = pysrt.open(filename, encoding='utf-8', error_handling='ignore')
-        result = []
+        # Detect encoding specifically for Persian text
+        encoding = detect_encoding_correctly(filename)
+        debug_print(f"Using encoding: {encoding} for {filename.name}")
+        
+        # Load with the detected encoding
+        subs = pysrt.open(filename, encoding=encoding)
+        results = []
+        
         for sub in subs:
-            start = sub.start.hours * 3600 + sub.start.minutes * 60 + sub.start.seconds + sub.start.milliseconds / 1000
-            end = sub.end.hours * 3600 + sub.end.minutes * 60 + sub.end.seconds + sub.end.milliseconds / 1000
+            # Format time
+            start_str = f"{sub.start.hours:02}:{sub.start.minutes:02}:{sub.start.seconds:02}"
+            end_str = f"{sub.end.hours:02}:{sub.end.minutes:02}:{sub.end.seconds:02}"
+            
+            if sub.start.milliseconds > 0:
+                start_str += f".{sub.start.milliseconds:03}"
+            if sub.end.milliseconds > 0:
+                end_str += f".{sub.end.milliseconds:03}"
+            
             text = sub.text.replace("\n", " ").strip()
-            result.append((start, end, text))
-        return result
+            
+            # Fix encoding issues if text is garbled
+            if text and not is_valid_persian_text(text):
+                debug_print(f"Found garbled text, trying to fix encoding: {text[:50]}...")
+                # Try to re-encode with different encodings
+                text = fix_garbled_text(text, encoding)
+            
+            results.append((start_str, end_str, text))
+        
+        debug_print(f"Successfully loaded {len(results)} lines")
+        return results
+        
     except Exception as e:
-        print(f"   ❌ Failed to load {filename}: {e}")
-        return []
+        debug_print(f"Failed to load {filename.name}: {str(e)}")
+        # Try one more time with UTF-8 and error ignoring
+        try:
+            subs = pysrt.open(filename, encoding='utf-8', error_handling='ignore')
+            results = []
+            for sub in subs:
+                start_str = f"{sub.start.hours:02}:{sub.start.minutes:02}:{sub.start.seconds:02}"
+                end_str = f"{sub.end.hours:02}:{sub.end.minutes:02}:{sub.end.seconds:02}"
+                if sub.start.milliseconds > 0:
+                    start_str += f".{sub.start.milliseconds:03}"
+                if sub.end.milliseconds > 0:
+                    end_str += f".{sub.end.milliseconds:03}"
+                text = sub.text.replace("\n", " ").strip()
+                results.append((start_str, end_str, text))
+            debug_print(f"Loaded with UTF-8 fallback: {len(results)} lines")
+            return results
+        except:
+            return []
 
-def find_best_match(en_start, en_end, persian_list):
-    """Find Persian subtitle with the most overlap in time"""
+def fix_garbled_text(text, original_encoding):
+    """Try to fix Mojibake (garbled text)"""
+    common_fixes = [
+        # Common encoding issues and their fixes
+        ('utf-8', 'cp1256'),  # UTF-8 misinterpreted as Windows-1256
+        ('cp1256', 'utf-8'),  # Windows-1256 misinterpreted as UTF-8
+        ('iso-8859-1', 'utf-8'),
+        ('windows-1252', 'utf-8'),
+    ]
+    
+    for wrong_enc, correct_enc in common_fixes:
+        try:
+            # Try to decode with wrong encoding and then encode with correct one
+            fixed = text.encode(wrong_enc).decode(correct_enc)
+            if is_valid_persian_text(fixed):
+                debug_print(f"Fixed text: {text[:30]} -> {fixed[:30]}")
+                return fixed
+        except:
+            continue
+    
+    # If all fixes fail, return empty string to avoid garbage
+    debug_print(f"Could not fix garbled text: {text[:50]}")
+    return ""
+
+def time_to_seconds_simple(time_str):
+    """Convert time string to seconds"""
+    try:
+        if '.' in time_str:
+            time_part, ms_part = time_str.split('.')
+            ms = float(f"0.{ms_part}")
+        else:
+            time_part = time_str
+            ms = 0
+        
+        parts = time_part.split(':')
+        if len(parts) == 3:
+            hours, minutes, seconds = map(int, parts)
+            return hours * 3600 + minutes * 60 + seconds + ms
+        return 0
+    except:
+        return 0
+
+def find_best_match_simple(eng_start, eng_end, persian_subs):
+    """Find matching translation"""
+    if not persian_subs:
+        return ""
+    
+    eng_start_sec = time_to_seconds_simple(eng_start)
+    eng_end_sec = time_to_seconds_simple(eng_end)
+    
     best_match = ""
-    best_overlap = 0
-    for (ps_start, ps_end, ps_text) in persian_list:
-        overlap_start = max(en_start, ps_start)
-        overlap_end = min(en_end, ps_end)
+    best_score = -1
+    
+    for ps_start, ps_end, ps_text in persian_subs:
+        if not ps_text.strip():
+            continue
+            
+        ps_start_sec = time_to_seconds_simple(ps_start)
+        ps_end_sec = time_to_seconds_simple(ps_end)
+        
+        overlap_start = max(eng_start_sec, ps_start_sec)
+        overlap_end = min(eng_end_sec, ps_end_sec)
         overlap = max(0, overlap_end - overlap_start)
-        if overlap > best_overlap:
-            best_overlap = overlap
+        
+        start_diff = abs(eng_start_sec - ps_start_sec)
+        score = overlap * 10 - start_diff
+        
+        if score > best_score:
+            best_score = score
             best_match = ps_text
+    
     return best_match
 
-def process_movie_folder(movie_folder, output_file=None):
-    """Process a single movie folder and generate comparison CSV"""
-    movie_folder = Path(movie_folder)
+def find_persian_subtitles(movie_folder):
+    """Find Persian subtitle files"""
+    folders_to_check = ['opensubtitle', 'subkade']
+    found_files = {}
     
-    # Set default output filename if not provided
-    if output_file is None:
-        output_file = movie_folder / f"{movie_folder.name}_comparison.csv"
-    else:
-        output_file = Path(output_file)
+    for folder_name in folders_to_check:
+        folder_path = movie_folder / folder_name
+        if folder_path.exists():
+            srt_files = [f for f in folder_path.glob("*.srt") 
+                        if 'english' not in f.name.lower() and 'en.' not in f.name.lower()]
+            if srt_files:
+                found_files[folder_name] = srt_files
+                debug_print(f"Found {len(srt_files)} files in {folder_name}")
     
-    # English subtitle
-    english_file = movie_folder / "english_subtitle.srt"
+    return found_files
+
+def process_movie(movie_path):
+    """Main processing function"""
+    debug_print(f"Starting processing for {movie_path.name}")
+    
+    # Load English subtitle
+    english_file = movie_path / "english_subtitle.srt"
     if not english_file.exists():
-        print(f"❌ Could not find english_subtitle.srt in {movie_folder}")
-        return False
-
-    # Persian subtitles
-    persian_folder = movie_folder / "persian"
-    if not persian_folder.exists():
-        print(f"❌ No persian folder found in {movie_folder}")
-        return False
-        
-    persian_files = sorted(persian_folder.glob("*.srt"))
-    if not persian_files:
-        print(f"❌ No Persian subtitle files found in {persian_folder}")
-        return False
-
-    print(f"📁 Processing: {movie_folder.name}")
-    print(f"   ✅ Found {len(persian_files)} Persian subtitle files.")
-
-    # Load subtitles with error handling
-    print(f"   📖 Loading English subtitle...")
-    english_subs = load_subs(english_file)
-    if not english_subs:
-        print(f"   ❌ Failed to load English subtitle")
-        return False
-
-    # Load Persian subtitles
-    persian_subs_all = []
-    successful_persian_files = []
-    
-    for persian_file in persian_files:
-        print(f"   📖 Loading {persian_file.name}...")
-        persian_subs = load_subs(persian_file)
-        if persian_subs:
-            persian_subs_all.append(persian_subs)
-            successful_persian_files.append(persian_file)
+        english_files = list(movie_path.glob("*english*.srt")) + list(movie_path.glob("*en*.srt"))
+        if english_files:
+            english_file = english_files[0]
+            debug_print(f"Using alternative English file: {english_file.name}")
         else:
-            print(f"   ❌ Skipping {persian_file.name} due to loading error")
-
-    if not persian_subs_all:
-        print(f"   ❌ No Persian subtitles could be loaded successfully")
-        return False
-
-    # Write CSV
-    try:
-        with open(output_file, "w", newline='', encoding="utf-8") as f:
-            writer = csv.writer(f)
-            header = ["Start Time", "End Time", "English"] + [f.name for f in successful_persian_files]
-            writer.writerow(header)
-
-            for (en_start, en_end, en_text) in english_subs:
-                row = [
-                    f"{int(en_start//60):02}:{int(en_start%60):02}",
-                    f"{int(en_end//60):02}:{int(en_end%60):02}",
-                    en_text
-                ]
-                for persian_list in persian_subs_all:
-                    row.append(find_best_match(en_start, en_end, persian_list))
-                writer.writerow(row)
-
-        print(f"   💾 Comparison saved to {output_file}")
-        return True
+            debug_print("No English subtitle file found")
+            return None
+    
+    english_subs = load_subtitle_file_correctly(english_file)
+    if not english_subs:
+        return None
+    
+    # Find and load Persian subtitles
+    persian_files = find_persian_subtitles(movie_path)
+    if not persian_files:
+        return None
+    
+    all_persian_subs = {}
+    file_mapping = {}
+    
+    for folder_name, files in persian_files.items():
+        all_persian_subs[folder_name] = {}
+        file_mapping[folder_name] = {}
         
-    except Exception as e:
-        print(f"   ❌ Error writing CSV: {e}")
-        return False
+        for i, file_path in enumerate(files, 1):
+            sub_name = f"subtitle_{i:02d}"
+            file_mapping[folder_name][sub_name] = file_path.name
+            
+            subs = load_subtitle_file_correctly(file_path)
+            if subs:
+                all_persian_subs[folder_name][sub_name] = subs
+            else:
+                all_persian_subs[folder_name][sub_name] = []
+    
+    # Create JSON
+    result = {
+        "movie": movie_path.name,
+        "file_mapping": file_mapping,
+        "subtitles": []
+    }
+    
+    for eng_start, eng_end, eng_text in english_subs:
+        entry = {
+            "time": f"{eng_start},{eng_end}",
+            "english": eng_text,
+            "translations": {}
+        }
+        
+        for folder_name, subs_dict in all_persian_subs.items():
+            entry["translations"][folder_name] = {}
+            for sub_name, persian_subs in subs_dict.items():
+                translation = find_best_match_simple(eng_start, eng_end, persian_subs)
+                entry["translations"][folder_name][sub_name] = translation
+        
+        result["subtitles"].append(entry)
+    
+    return result
 
 def main():
-    # Default values
-    data_folder = "Data"
-    default_csv_name = "subtitle_comparison.csv"
+    print("🎬 Starting Persian Subtitle Matcher")
+    print("=" * 50)
     
-    # Parse command line arguments
-    if len(sys.argv) == 1:
-        # No arguments: process all folders in Data directory
-        target_folders = [f for f in Path(data_folder).iterdir() if f.is_dir()]
-        output_files = [None] * len(target_folders)
-        
-    elif len(sys.argv) == 2:
-        # One argument: could be a folder or CSV name
-        arg = sys.argv[1]
-        if Path(arg).is_dir():
-            target_folders = [Path(arg)]
-            output_files = [None]
-        else:
-            target_folders = [f for f in Path(data_folder).iterdir() if f.is_dir()]
-            output_files = [Path(data_folder) / arg] * len(target_folders)
-            
-    elif len(sys.argv) == 3:
-        # Two arguments: specific folder and specific CSV
-        target_folders = [Path(sys.argv[1])]
-        output_files = [sys.argv[2]]
-        
+    if len(sys.argv) > 1:
+        movie_folders = [Path(sys.argv[1])]
     else:
-        print("Usage: python compare_folder.py [movie_folder] [output.csv]")
-        print("  No arguments: process all folders in Data/ with default naming")
-        print("  One argument: process specific folder or use custom CSV name for Data/")
-        print("  Two arguments: process specific folder with specific CSV file")
-        sys.exit(1)
-
-    # Process all target folders
-    success_count = 0
-    total_count = len(target_folders)
+        data_folder = Path("Data")
+        movie_folders = [f for f in data_folder.iterdir() if f.is_dir()]
     
-    for i, (movie_folder, output_file) in enumerate(zip(target_folders, output_files), 1):
-        if not movie_folder.is_dir():
-            print(f"❌ Skipping non-directory: {movie_folder}")
-            continue
-            
-        print(f"\n[{i}/{total_count}] ", end="")
-        if process_movie_folder(movie_folder, output_file):
-            success_count += 1
+    successful = 0
+    for movie_folder in movie_folders:
+        print(f"\n📁 Processing: {movie_folder.name}")
+        print("-" * 30)
+        
+        result = process_movie(movie_folder)
+        if result:
+            output_file = movie_folder / f"{movie_folder.name}_comparison.json"
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(result, f, ensure_ascii=False, indent=2)
+            print(f"✅ SUCCESS: Saved to {output_file}")
+            successful += 1
+        else:
+            print(f"❌ FAILED: Could not process {movie_folder.name}")
     
-    print(f"\n🎉 Completed! Successfully processed {success_count}/{total_count} folders.")
+    print(f"\n🎉 Finished! {successful}/{len(movie_folders)} movies processed successfully")
 
 if __name__ == "__main__":
     main()
